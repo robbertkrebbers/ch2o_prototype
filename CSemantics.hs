@@ -31,6 +31,11 @@ type Id = String
 data StructUnion = Struct | Union deriving (Eq, Show)
 data Type = TVoid | TInt | TPointer Type | TArray Type Int | TStruct StructUnion Id deriving (Eq, Show)
 
+instance Ord Type where
+  τ1 <= τ2 | τ1 == τ2 = True
+  τ1 <= TArray τ2 _   = τ1 <= τ2
+  _  <= _             = False
+
 class TypeOf a where
   typeOf :: a -> Type
 
@@ -275,7 +280,7 @@ checkVal' e _ (VUndef τ)             = checkType e τ
 checkVal' _ _ (VInt _)               = True
 checkVal' e _ (VNULL τ)              = checkType e τ
 checkVal' e t (VPointer τ a)         = case t (aBlock a) of
-  Just σ  -> checkAddr' e t a && arrayBase τ == arrayBase σ
+  Just σ  -> checkAddr' e t a && τ < σ
   Nothing -> False
 checkVal' e t (VStruct s vs)         = maybe False (checkAValList' e t vs) (fields Struct s e)
 checkVal' e _ (VUnion s Nothing)     = (Union,s) `inDom` e
@@ -292,10 +297,13 @@ checkAValList' _ _ _ _           = False
 
 {- Manipulation of values -}
 cast :: EnvReader m => Val -> Type -> MaybeT m Val
-cast (VPointer _ a)     (TPointer TVoid) = return (VPointer TVoid a)
-cast (VPointer _ a)     (TPointer τ)     = guard (arrayBase τ == typeOf a) >> return (VPointer τ a)
-cast (VNULL _)          (TPointer τ)     = return (VNULL τ)
-cast v                  τ                = guard (typeOf v == τ) >> return v
+cast (VPointer _ a) (TPointer TVoid) = return (VPointer TVoid a)
+-- a weaker alternative would be:
+--   cast (VPointer _ a) (TPointer τ)     = guard (arrayBase τ == typeOf a) >> return (VPointer τ a)
+-- maybe we should strip one array of aType a
+cast (VPointer _ a) (TPointer τ)     = guard (τ < aType a) >> return (VPointer τ a)
+cast (VNULL _)      (TPointer τ)     = return (VNULL τ)
+cast v              τ                = guard (typeOf v == τ) >> return v
 
 follow :: Env -> Ref -> Val -> Maybe Val
 follow _ [] τ                                              = Just τ
