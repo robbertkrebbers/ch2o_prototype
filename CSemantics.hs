@@ -299,8 +299,7 @@ checkAValList' _ _ _ _           = False
 cast :: EnvReader m => Val -> Type -> MaybeT m Val
 cast (VPointer _ a) (TPointer TVoid) = return (VPointer TVoid a)
 -- a weaker alternative would be:
---   cast (VPointer _ a) (TPointer τ)     = guard (arrayBase τ == typeOf a) >> return (VPointer τ a)
--- maybe we should strip one array of aType a
+--   cast (VPointer _ a) (TPointer τ) = guard (arrayBase τ == typeOf a) >> return (VPointer τ a)
 cast (VPointer _ a) (TPointer τ)     = guard (τ < aType a) >> return (VPointer τ a)
 cast (VNULL _)      (TPointer τ)     = return (VNULL τ)
 cast v              τ                = guard (typeOf v == τ) >> return v
