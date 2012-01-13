@@ -40,7 +40,7 @@ pAddr p = do
 
 pIsAlligned :: Pointer c -> Bool
 pIsAlligned (Pointer _ _ _ TVoid) = True
-pIsAlligned (Pointer _ τa i τ)    = τ <= τa && i `quot` arrayWidth τ == 0
+pIsAlligned (Pointer _ τa i τ)    = τ `subType` τa && i `quot` arrayWidth τ == 0
 
 pCisReset :: Cis d => Pointer c -> Pointer d
 pCisReset p = p { pObjAddr = aCisReset (pObjAddr p) }

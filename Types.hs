@@ -25,10 +25,10 @@ data Type =
   TArray Type Int |
   TStruct StructUnion Bool Id deriving (Eq, Show) -- TStruct su const s
 
-instance Ord Type where
-  τ1 <= τ2 | τ1 == τ2 = True
-  τ1 <= TArray τ2 _   = τ1 <= τ2
-  _  <= _             = False
+subType :: Type -> Type -> Bool
+τ1 `subType` τ2 | τ1 == τ2 = True
+τ1 `subType` TArray τ2 _   = τ1 `subType` τ2
+_  `subType` _             = False
 
 class BTypeOf a where
   bTypeOf :: a -> BType
