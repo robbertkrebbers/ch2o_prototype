@@ -209,8 +209,8 @@ constExpr f (VLArray τvl r)   = do
   return (TArray τ (fromEnum n))
 constExpr _ (EVal a)          = return a
 constExpr f (EToVal l)        = do
-  Pointer p σ (TArray τ _) <- constExpr f l
-  return (VBase False (VPointer (Pointer p σ τ)))
+  Pointer a τa i (TArray τ _) <- constExpr f l
+  return (VBase False (VPointer (Pointer a τa i τ)))
 constExpr f (EAddrOf l)       = VBase False . VPointer <$> constExpr f l
 constExpr f (EBinOp op r1 r2) = do
   v1 <- constExpr f r1

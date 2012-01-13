@@ -193,9 +193,9 @@ redexStep es (RedAssign k p v)              = do
   store p v -- fails if a is indeterminate
   nextExpr es k (EVal v)
 redexStep es (RedToVal k p)                 = case typeOf p of
-   TArray σ _ -> do
+   TArray τ _ -> do
      guardM (isDeterminate p)
-     let p' = p { pType = σ } in nextExpr es k (EVal (VBase False (VPointer p')))
+     let p' = p { pType = τ } in nextExpr es k (EVal (VBase False (VPointer p')))
    _          -> load p >>= nextExpr es k . EVal . remConst -- fails if a is indeterminate
 redexStep es (RedAddrOf k p)                = do
   guardM (isDeterminate p)

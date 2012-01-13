@@ -41,17 +41,20 @@ free = simpleFree
 
 load :: MemWriter m => LVal -> MaybeT m RVal
 load lv = do
-  v <- simpleLoad (pAddr lv)
+  a <- maybeT (pAddr lv)
+  v <- simpleLoad a
   guardM (isDeterminate v)
   return (fmap pCisReset <$> v)
 
 store :: MemWriter m => LVal -> RVal -> MaybeT m ()
-store lv rv = simpleStore (pAddr lv) (fmap pCisReset <$> rv)
+store lv rv = do
+  a <- maybeT (pAddr lv)
+  simpleStore a (fmap pCisReset <$> rv)
 
 aToVal :: MemWriter m => RAVal -> MaybeT m (Maybe Block, RVal)
 aToVal ar@(VArray (TArray τ n) _) = do
   b <- alloc (TArray τ n) (Just ar) MTemp
-  return (Just b, VBase False $ VPointer $ Pointer (addr b) (TArray τ n) τ)
+  return (Just b, VBase False $ VPointer $ Pointer (addr b) (TArray τ n)  0 τ)
 aToVal (VArray _ [v])             = guardM (isDeterminate v) >> return (Nothing, v)
 aToVal (VArray _ _)               = nothingT
 

@@ -30,49 +30,32 @@ class BlockOf a where
 
 {- Addresses -}
 data Addr :: * -> (* -> *) -> * where
-  Addr  :: Block -> Ref c AVal AVal -> Int -> Addr c Val
-  AddrA :: Block -> Ref c AVal AVal -> Addr c AVal
+  Addr :: Block -> Ref c AVal w -> Addr c w
 
 deriving instance Eq c   => Eq (Addr c w)
 deriving instance Show c => Show (Addr c w)
 
-addr :: Block -> Addr c Val
-addr b = Addr b RHere 0
+addr :: Block -> Addr c AVal
+addr b = Addr b RHere
 
-instance BlockOf (Addr c v) where
-  blockOf (Addr b _ _) = b
-  blockOf (AddrA b _)  = b
+instance BlockOf (Addr c w) where
+  blockOf (Addr b _) = b
 
-aOffset :: Addr c w -> Int
-aOffset (Addr b _ _) = b
-aOffset (AddrA b _)  = b
-
-aRef :: Addr c w -> Ref c AVal AVal
-aRef (Addr _ p _) = p
-aRef (AddrA _ p)  = p
-
-aNormalize :: Cis c => Addr c v -> Ref c AVal v
-aNormalize (Addr _ p i) = branchA i p
-aNormalize (AddrA _ p)  = p
-
-instance Cis c => SimpleReference (Addr c) where
-  branch su i a         = AddrA (blockOf a) (branch su i (aNormalize a))
-  branchA i (AddrA b p) = Addr b p i
+aRef :: Addr c w -> Ref c AVal w
+aRef (Addr _ p) = p
 
 aMove :: Int -> Addr c Val -> Addr c Val
-aMove x (Addr b p i) = Addr b p (i + x)
+aMove x (Addr b p) = Addr b (rMove x p)
 
-aBranch :: Cis c => StructUnion -> Int -> Addr c Val -> Addr c Val
-aBranch su i = branchA 0 . branch su i
+instance Cis c => SimpleReference (Addr c) where
+  branch su i (Addr b p) = Addr b (branch su i p)
+  branchA i (Addr b p)   = Addr b (branchA i p)
 
-instance Related (Addr c v) where
-  Addr b1 p1 i1 `related` Addr b2 p2 i2 = b1 == b2 && p1 `related` p2 && i1 == i2
-  AddrA b1 p1   `related` AddrA b2 p2   = b1 == b2 && p1 `related` p2
-  _             `related` _             = error "impossible"
+instance Related (Addr c w) where
+  Addr b1 p1 `related` Addr b2 p2 = b1 == b2 && p1 `related` p2
 
-aCisReset :: Cis d => Addr c v -> Addr d v
-aCisReset (Addr b p i) = Addr b (rCisReset p) i
-aCisReset (AddrA b p)  = AddrA b (rCisReset p)
+aCisReset :: Cis d => Addr c w -> Addr d w
+aCisReset (Addr b p) = Addr b (rCisReset p)
 
 {- Memory -}
 data MFlag = MStatic | MAuto | MTemp | MMalloc | MFreed deriving (Eq, Show)
@@ -131,11 +114,11 @@ blockValid b = fromMaybeT False $ do
 typeOfBlock :: SimpleMemReader a m => Block -> MaybeT m Type
 typeOfBlock b = typeOf <$> getSpace b
 
-instance (BTypeOf a, SimpleMemReader a m) => Check m (Addr c Val) where
-  check (Addr b p i) = fromMaybeT False $ do
+instance (BTypeOf a, SimpleMemReader a m) => Check m (Addr c v) where
+  check (Addr b p) = fromMaybeT False $ do
     τb <- typeOfBlock b
-    τ <- target p τb
-    return (0 <= i && i <= arrayWidth τ)
+    _ <- target p τb
+    return True
 
 simpleAlloc :: SimpleMemWriter a m => AVal a -> MFlag -> m Block
 simpleAlloc v f = do
@@ -150,19 +133,19 @@ simpleFree mal b = do
   guard (f /= MFreed && (not mal || f == MMalloc))
   modifyMem $ \m -> m { blocks = IntMap.insert b (MSpace w MFreed) (blocks m) }
 
-simpleLoad :: (SimpleMemReader a m, Cis c) => Addr c v -> MaybeT m (v a)
+simpleLoad :: (SimpleMemReader a m, Cis c) => Addr c w -> MaybeT m (w a)
 simpleLoad a = do
-  MSpace w f <- getSpace (blockOf a)
+  MSpace v f <- getSpace (blockOf a)
   guard (f /= MFreed)
-  follow (aNormalize a) w
+  follow (aRef a) v
 
-simpleUpdate :: (SimpleMemWriter a m, Cis c) => (v a -> MaybeT m (v a)) -> Addr c v -> MaybeT m ()
+simpleUpdate :: (SimpleMemWriter a m, Cis c) => (w a -> MaybeT m (w a)) -> Addr c w -> MaybeT m ()
 simpleUpdate up a = do
   MSpace w f <- getSpace (blockOf a)
   guard (f /= MFreed && f /= MTemp && not (isConst w))
-  w' <- vUpdate up (aNormalize a) w
+  w' <- vUpdate up (aRef a) w
   modifyMem $ \m -> m { blocks = IntMap.insert (blockOf a) (MSpace w' f) (blocks m) }
 
-simpleStore :: (SimpleMemWriter a m, Cis c) => Addr c v -> v a -> MaybeT m ()
+simpleStore :: (SimpleMemWriter a m, Cis c) => Addr c w -> w a -> MaybeT m ()
 simpleStore a v = simpleUpdate (\_ -> return v) a
 

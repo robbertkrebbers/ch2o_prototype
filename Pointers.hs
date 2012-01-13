@@ -15,13 +15,14 @@ import Control.Monad.Maybe
 
 {- Pointers -}
 data Pointer c = Pointer {
-  pAddr     :: Addr c Val,
+  pObjAddr  :: Addr c AVal,
   pObjType  :: Type,
+  pOffset   :: Int,
   pType     :: Type
 } deriving (Eq, Show)
 
 instance BlockOf (Pointer c) where
-  blockOf = blockOf . pAddr
+  blockOf = blockOf . pObjAddr
 
 instance TypeOf (Pointer c) where
   typeOf = pType
@@ -29,48 +30,47 @@ instance TypeOf (Pointer c) where
 pLength :: Pointer c -> Int
 pLength = arrayWidth . pObjType
 
-pRef :: Pointer c -> Ref c AVal AVal
-pRef = aRef . pAddr
-
-pOffset :: Pointer c -> Int
-pOffset = aOffset . pAddr
-
 pInRange :: Pointer c -> Bool
 pInRange p = 0 <= pOffset p && pOffset p < pLength p
 
+pAddr :: Cis c => Pointer c -> Maybe (Addr c Val)
+pAddr p = do
+  guard (pInRange p)
+  Just (branchA (pOffset p) (pObjAddr p))
+
 pIsAlligned :: Pointer c -> Bool
-pIsAlligned (Pointer _ _ TVoid) = True
-pIsAlligned (Pointer a σ τ)     = τ <= σ && aOffset a `quot` arrayWidth τ == 0
+pIsAlligned (Pointer _ _ _ TVoid) = True
+pIsAlligned (Pointer _ τa i τ)    = τ <= τa && i `quot` arrayWidth τ == 0
 
 pCisReset :: Cis d => Pointer c -> Pointer d
-pCisReset p = p { pAddr = aCisReset (pAddr p) }
+pCisReset p = p { pObjAddr = aCisReset (pObjAddr p) }
 
 pCast :: Pointer c -> Type -> Maybe (Pointer c)
-pCast (Pointer a σ _) τ = 
-  let p' = Pointer a σ τ in do
+pCast (Pointer a aτ i _) σ = 
+  let p' = Pointer a aτ i σ in do
   guard (pIsAlligned p')
   return p'
 
 instance (BTypeOf a, SimpleMemReader a m) => Check m (Pointer c) where
-  check p = check (pAddr p) &&? return (0 <= pOffset p && pOffset p <= pLength p && pIsAlligned p)
+  check p = check (pObjAddr p) &&? return (0 <= pOffset p && pOffset p <= pLength p && pIsAlligned p)
 
 blockPointer :: SimpleMemReader a m => Block -> MaybeT m (Pointer c)
 blockPointer b = do
   τ <- typeOfBlock b
-  return (Pointer (addr b) τ τ)
+  return (Pointer (addr b) τ 0 τ)
 
 pPlus :: Int -> Pointer c -> Maybe (Pointer c)
-pPlus x (Pointer a σ τ) =
-  let a'  = aMove (fromEnum x * arrayWidth τ) a in do
-  guard (0 <= aOffset a' && aOffset a' < arrayWidth σ)
-  Just (Pointer a' σ τ)
+pPlus x (Pointer a τa i τ) =
+  let i'  = i + fromEnum x * arrayWidth τ in do
+  guard (0 <= i' && i' < arrayWidth τa)
+  Just (Pointer a τa i' τ)
 
 pMinus :: Pointer c -> Pointer c -> Maybe Int
-pMinus (Pointer a1 _ τ1) (Pointer a2 _ τ2) = do
+pMinus (Pointer a1 _ i1 τ1) (Pointer a2 _ i2 τ2) = do
   guard (blockOf a1 == blockOf a2)
-  guard (aRef (aCisReset a1 :: Addr () Val) == aRef (aCisReset a1 :: Addr () Val))
+  guard (aRef (aCisReset a1 :: Addr () AVal) == aRef (aCisReset a1 :: Addr () AVal))
   guard (τ1 == τ2)
-  let n = aOffset a1 - aOffset a2 in do
+  let n = i1 - i2 in do
   guard (n `rem` arrayWidth τ1 == 0)
   Just (n `quot` arrayWidth τ1)
 
@@ -82,13 +82,14 @@ pBranch su i p = case typeOf p of
   TStruct su' c s | su == su' -> do
     guardM (isDeterminate p)
     τ <- field su c s i
-    return (Pointer (aBranch su i (pAddr p)) τ τ)
+    a <- maybeT (pAddr p)
+    return (Pointer (branch su i a) τ 0 τ)
   _                           -> nothingT
 
 instance SimpleMemReader a m => FuzzyOrd (MaybeT m) (Pointer c) where
   p ==? q | blockOf p == blockOf q = do
     guardM (isDeterminate p)
-    r <- maybeT (pRef p ==? pRef q)
+    r <- maybeT (aRef (pObjAddr p) ==? aRef (pObjAddr q))
     if r
     then return (pOffset p == pOffset q)
     else guard (pInRange p && pInRange q) >> return False
@@ -106,10 +107,10 @@ instance SimpleMemReader a m => FuzzyOrd (MaybeT m) (Pointer c) where
 
   p <=? q | blockOf p == blockOf q = do
     guardM (isDeterminate p)
-    r <- maybeT (pRef p ==? pRef q)
+    r <- maybeT (aRef (pObjAddr p) ==? aRef (pObjAddr q))
     if r
     then return (pOffset p <= pOffset q)
-    else guard (pInRange p && pInRange q) >> maybeT (pRef p <=? pRef q)
+    else guard (pInRange p && pInRange q) >> maybeT (aRef (pObjAddr p) <=? aRef (pObjAddr q))
   _ <=? _ | otherwise            = nothingT
 
 {-
