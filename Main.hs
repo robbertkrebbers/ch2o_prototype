@@ -1,10 +1,12 @@
 {-# OPTIONS_GHC -Wall #-}
 
 import Util
-import Prelude
-import qualified Data.Map as Map
+import RLValues
 import CSemantics
 import Parser
+
+import Prelude
+import qualified Data.Map as Map
 import Control.Monad.Error
 import Control.Applicative
 import Language.C hiding (Error)
@@ -24,7 +26,7 @@ parseStringNice str = case parseString str of
   Right c -> (\_ -> ()) <$> c
   
 -- ugly
-evalString :: String -> Either String Val
+evalString :: String -> Either String (Maybe RVal)
 evalString str = do
   tu <- parseString str
   case runPreCMonad_ (cTranslUnitToProg tu) of

@@ -2,6 +2,7 @@
 {-# OPTIONS -XTypeSynonymInstances #-}
 {-# OPTIONS -XFlexibleInstances #-}
 {-# OPTIONS -XTupleSections #-}
+{-# OPTIONS -XMultiParamTypeClasses #-}
 
 {-
 Missing:
@@ -13,8 +14,17 @@ Missing:
 -}
 module Parser where
 
+import Debug.Trace
+
 import Util
+import Types
+import Values
+import SimpleMemory
+import Memory
+import Expressions
+import Statements
 import CSemantics
+
 import Data.Maybe
 import Data.List hiding (insert)
 import Data.Map (Map)
@@ -61,9 +71,11 @@ data PreCState = PreCState {
   pStructCounter :: Int
 } deriving (Eq, Show)
 
-instance MemReader (State PreCState) where
+instance EnvReader (State PreCState) where
+  getEnv = gets (mEnv . pMem)
+instance SimpleMemReader MBVal (State PreCState) where
   getMem = gets pMem
-instance MemWriter (State PreCState) where
+instance SimpleMemWriter MBVal (State PreCState) where
   setMem m = modify $ \s -> s { pMem = m }
 instance ScopeMonad (State PreCState) where
   openScope = modify $ \s -> s { pScopes = newScope:pScopes s }
@@ -152,7 +164,7 @@ pGetStruct su s = do
 
 pFreshStruct :: Maybe Id -> State PreCState Id
 pFreshStruct ms = 
-  let s = maybe "anonymous" id ms in do
+  let s = fromMaybe "anonymous" ms in do
   n <- gets pStructCounter
   modify $ \st -> st { pStructCounter = n+1 }
   return (s ++ show n)
@@ -171,7 +183,7 @@ pNewStruct _  Nothing = lift (pFreshStruct Nothing)
 pStoreStruct :: StructUnion -> Id -> Assoc Id Type -> PreCMaybe ()
 pStoreStruct su s fs = do
   modify $ \st -> st { pStructFields = Map.insert s xs (pStructFields st) }
-  modifyMem $ \m -> m { memEnv = insertUnsafe (su,s) τs (memEnv m) }
+  modifyMem $ \m -> m { mEnv = insertUnsafe (su,s) τs (mEnv m) }
  where xs = fst <$> fs; τs = snd <$> fs
 
 scopeDecls :: PreCMonad (Assoc Id Decl)
@@ -218,9 +230,6 @@ pAnd r1 r2 = PIf r1 (PIf r2 pTrue pFalse) pFalse
 pOr :: PExpr -> PExpr -> PExpr
 pOr r1 r2 = PIf r1 pTrue (PIf r2 pTrue pFalse)
 
-binOpCast :: BinOp -> PExpr -> PExpr -> Maybe (PExpr,PExpr)
-binOpCast = undefined
-
 pToRExpr :: PExpr -> PreCMonad (RExpr,Type)
 pToRExpr (PCall x es)    = do
   PFun xs τ _ <- tryT ("function " ++ show x ++ " does not exist") (pGetFun x)
@@ -240,14 +249,14 @@ pToRExpr (PAssign e1 e2) = do
   (r,τr) <- pToRExpr e2
   unless (τl == τr) $ throwError ("assignment of " ++ show τr ++ " to " ++ show τl)
   return (EAssign l r, τr)
-pToRExpr (PInt i)        = return (EVal (VInt i), TInt)
+pToRExpr (PInt i)        = return (EVal (VBase False (VInt i)), TBase False TInt)
 pToRExpr (PAddrOf e)     = do
   (l,τ) <- pToLExpr e
-  return (EAddrOf l, TPointer τ)
+  return (EAddrOf l, TBase False (TPointer τ))
 pToRExpr p@(PField i e)  = ll `mplus` do
-  (r,TStruct su s) <- pToRExpr e
+  (r,TStruct su _ s) <- pToRExpr e
   j <- tryT (show i ++ " is not a field of " ++ show s) (pFieldIndex s i)
-  τj <- tryT (show i ++ " is not a field of " ++ show s) (fieldM su s j)
+  τj <- tryT (show i ++ " is not a field of " ++ show s) (field su False s j)
   return (EField su j r, arrayToPointer τj)
  where
   ll = do (l,τ) <- pToLExpr p; return (EToVal l, arrayToPointer τ)
@@ -300,9 +309,9 @@ pToLExpr (PDeref e)     = do
   when (isVoid τ) $ throwError "deref of void pointer"
   return (EDeref r, τ)
 pToLExpr (PField i e)   = do
-  (l,TStruct su s) <- pToLExpr e
+  (l,TStruct su c s) <- pToLExpr e
   j <- tryT (show i ++ " is not a field of " ++ show s) (pFieldIndex s i)
-  τj <- tryT (show i ++ " is not a field of " ++ show s) (fieldM su s j)
+  τj <- tryT (show i ++ " is not a field of " ++ show s) (field su c s j)
   return (ELField su j l, τj)
 pToLExpr e              = throwError (show e ++ " cannot be used as L-expression")
 
@@ -397,7 +406,7 @@ cStructUnionToType :: CStructUnion -> PreCMonad Type
 cStructUnionToType (CStruct su (Just s) Nothing _ _) =
   let su' = cToStructUnion su in do
   s' <- tryT "struct/union not declared" (pGetStruct su' (identToString s))
-  return (TStruct su' s')
+  return (TStruct su' False s')
 cStructUnionToType (CStruct _ Nothing Nothing _ _)   = throwError "struct/union without name and fields"
 cStructUnionToType (CStruct su ms (Just ds) _ _)     = 
   let su' = cToStructUnion su in do
@@ -405,7 +414,7 @@ cStructUnionToType (CStruct su ms (Just ds) _ _)     =
   fds <- foldCDecls f (return []) ds
   when (length fds == 0) $ throwError "struct/union with empty field list"
   tryT "failed to store struct/union" (pStoreStruct su' s' fds)
-  return (TStruct su' s')
+  return (TStruct su' False s')
  where
   f :: Maybe (Id, Storage) -> VLType -> Maybe RExpr -> PreCMonad (Assoc Id Type) -> PreCMonad (Assoc Id Type)
   f Nothing           _   _        _  = throwError "nameless struct/union field"
@@ -417,7 +426,7 @@ cStructUnionToType (CStruct su ms (Just ds) _ _)     =
 
 cTypeSpecToType :: [CTypeSpec] -> PreCMonad Type
 cTypeSpecToType []                  = throwError "invalid type spec"
-cTypeSpecToType (CIntType _:_)      = return TInt
+cTypeSpecToType (CIntType _:_)      = return (TBase False TInt)
 cTypeSpecToType (CShortType _:l)    = cTypeSpecToType l
 cTypeSpecToType (CLongType _:l)     = cTypeSpecToType l
 cTypeSpecToType (CFloatType _:_)    = throwError "float not supported"
@@ -437,13 +446,13 @@ cTypeSpecToType (CCharType _:_)     = throwError "char not supported"
 cInitToRExpr :: VLType -> CInit -> PreCMonad RExpr
 cInitToRExpr τvl (CInitExpr e _) = do
   (r,τ) <- cToRExpr e
-  unless (τ == vlErase τvl) $ throwError "initialiser of incorrect type"
+  unless (τ == remConst (vlErase τvl)) $ throwError "initialiser of incorrect type"
   return r    
 cInitToRExpr _   (CInitList _ _) = throwError "compound initialiser not supported"
 
 cAddDerivedDeclr' :: Type -> [CDerivedDeclr] -> PreCMonad VLType
 cAddDerivedDeclr' τ []                               = return (VLType τ)
-cAddDerivedDeclr' τ (CPtrDeclr _ _:l)                = VLPointer <$> cAddDerivedDeclr' τ l
+cAddDerivedDeclr' τ (CPtrDeclr qs _:l)               = VLPointer (cIsConst qs) <$> cAddDerivedDeclr' τ l
 cAddDerivedDeclr' τ (CArrDeclr _ (CArrSize _ e) _:l) = do
   (pe,τe) <- cToRExpr e
   unless (isInteger τe) $ throwError "error size should be an integer"
@@ -459,9 +468,14 @@ cAddDerivedDeclr τ l = do
   unless (checkType e (vlErase τvl)) $ throwError "invalid type"
   return τvl
 
+cIsConst :: [CTypeQual] -> Bool
+cIsConst []               = False
+cIsConst (CConstQual _:_) = True
+cIsConst (_:cs)           = cIsConst cs
+
 cDeclSpecsToType :: [CDeclSpec] -> PreCMonad (Storage, Type)
-cDeclSpecsToType l = (,) <$> cToStorage ss <*> cTypeSpecToType tss
- where (ss,_,_,tss,_) = partitionDeclSpecs l
+cDeclSpecsToType l = (,) <$> cToStorage ss <*> (makeConst (cIsConst qs) <$> cTypeSpecToType tss)
+ where (ss,_,qs,tss,_) = partitionDeclSpecs l
 
 data Storage = Auto | Static deriving (Eq, Show)
 
@@ -524,7 +538,7 @@ cDeclToStmt = flip (foldCDecl f)
   f (Just (x,Static)) τvl mr ms = do
     τ <- try "VL static" (constExpr_ τvl)
     mv <- tryT "non const static" (maybeMapM pConstExpr mr)
-    b <- alloc τ (aVal <$> mv) MStatic
+    b <- tryT "failed to alloc static" (alloc τ (aVal <$> mv) MStatic)
     tryT "variable not fresh" (pNewDecl x (PStatic b))
     ms
   f Nothing           _   _  _  = throwError "unnamed declaration"
@@ -555,7 +569,7 @@ cToStmt (CReturn e _)          = SReturn <$> maybeMapM cToRExpr_ e -- the return
 cToStmt (CLabel l s _ _)       = SLabel (identToString l) <$> cToStmt s -- l should be fresh in function scope
 cToStmt (CCase r s _)          = do
   re <- cToRScalar r
-  VInt n <- try "non constant expression in case" (constExpr_ re)
+  VBase _ (VInt n) <- try "non constant expression in case" (constExpr_ re)
   SCase (Just n) <$> cToStmt s -- n should be fresh
 cToStmt (CDefault s _)         = SCase Nothing <$> cToStmt s
 cToStmt (CGoto l _)            = return (SGoto (identToString l)) -- l should exist in function scope
@@ -575,7 +589,7 @@ cEDeclsToProg (CDeclExt d:eds) = foldCDecl f (cEDeclsToProg eds) d
   f (Just (x,_)) τvl mr m = do
     τ <- try "global of VL type" (constExpr_ τvl)
     mv <- tryT "non const global" (maybeMapM pConstExpr mr)
-    b <- alloc τ (aVal <$> mv) MStatic
+    b <- tryT "failed to alloc global" (alloc τ (aVal <$> mv) MStatic)
     tryT "global not fresh" (pNewDecl x (PStatic b))
     m
 cEDeclsToProg (CFDefExt d:eds) = cToFun d >> cEDeclsToProg eds
@@ -592,7 +606,7 @@ cToFun (CFunDef dss (CDeclr (Just x) l _ _ _) _ s _) =
       xs <- cToFunArgs ds
       tryT "function already exists" (pNewFun (identToString x) xs τf)
       openScope
-      tryT "modifying scope failed" (setScope (Scope [] (mapAssoc PAuto xs)))
+      tryT "modifying scope failed" (setScope (Scope [] (assocMap PAuto xs)))
       s' <- cToStmt s
       closeScope
       tryT "function already completed" (pStoreFun (identToString x) s')
@@ -600,8 +614,8 @@ cToFun (CFunDef dss (CDeclr (Just x) l _ _ _) _ s _) =
     _                               -> throwError "function of non-function type"
 
 cToFunArgs :: [CDecl] -> PreCMonad (Assoc Id Type)
-cToFunArgs [CDecl [CTypeSpec (CVoidType _)] _ _] = return []
-cToFunArgs ds                                    = foldCDecls f (return []) ds
+cToFunArgs [CDecl [CTypeSpec (CVoidType _)] [] _] = return []
+cToFunArgs ds                                     = foldCDecls f (return []) ds
  where
   f :: Maybe (Id, Storage) -> VLType -> Maybe RExpr -> PreCMonad (Assoc Id Type) -> PreCMonad (Assoc Id Type)
   f Nothing        _   _  _   = throwError "anonymous function argument"

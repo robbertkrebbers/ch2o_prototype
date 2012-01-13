@@ -11,6 +11,8 @@ import Control.Monad.Maybe
 import Control.Monad.Error
 import Control.Monad.State
 
+{- Blocks -}
+type Id = String
 type Assoc k a = [(k,a)]
 
 inDom :: Eq k => k -> Assoc k a -> Bool
@@ -27,15 +29,23 @@ insertUnsafe k a l = (k,a):l
 insert :: Eq k => k -> a -> Assoc k a -> Maybe (Assoc k a)
 insert k x l = guard (not (k `inDom` l)) >> return (insertUnsafe k x l)
 
-mapAssoc :: (a -> b) -> Assoc k a -> Assoc k b
-mapAssoc f = map $ \(k,x) -> (k,f x)
+assocMap :: (a -> b) -> Assoc k a -> Assoc k b
+assocMap f = map $ \(k,x) -> (k,f x)
 
-mapMAssoc :: Monad m => (a -> m b) -> Assoc k a -> m (Assoc k b)
-mapMAssoc f = mapM $ \(k,x) -> liftM (k,) (f x)
+assocMapM :: Monad m => (a -> m b) -> Assoc k a -> m (Assoc k b)
+assocMapM f = mapM $ \(k,x) -> liftM (k,) (f x)
+
+(&&?) :: Monad m => m Bool -> m Bool -> m Bool
+(&&?) = liftM2 (&&)
+
+(||?) :: Monad m => m Bool -> m Bool -> m Bool
+(||?) = liftM2 (||)
 
 allM :: Monad m => (a -> m Bool) -> [a] -> m Bool
-allM _ []     = return True
-allM f (x:xs) = liftM2 (&&) (f x) (allM f xs)
+allM f = foldM (\b x -> f x &&? return b) True
+
+anyM :: Monad m => (a -> m Bool) -> [a] -> m Bool
+anyM f = foldM (\b x -> f x ||? return b) True
 
 try :: MonadError e m => e -> Maybe a -> m a
 try e = maybe (throwError e) return
@@ -101,12 +111,6 @@ maybeRight :: Either a b -> Maybe b
 maybeRight (Left _)  = Nothing
 maybeRight (Right b) = Just b
 
-(&&?) :: Monad m => m Bool -> m Bool -> m Bool
-(&&?) = liftM2 (&&)
-
-(||?) :: Monad m => m Bool -> m Bool -> m Bool
-(||?) = liftM2 (||)
-
 infix 4 ==?, <=?
 
 class (Monad m, Functor m) => FuzzyOrd m a where
@@ -118,4 +122,11 @@ class (Monad m, Functor m) => FuzzyOrd m a where
   
   (<?) :: a -> a -> m Bool
   x <? y = (x /=? y) &&? (x <=? y)
+
+iFoldr :: (Int -> a -> b -> b) -> b -> Int -> [a] -> b
+iFoldr _ b _ []     = b
+iFoldr f b i (x:xs) = f i x (iFoldr f b (i+1) xs)
+
+iMapM :: Monad m => (Int -> a -> m b) -> Int -> [a] -> m [b]
+iMapM f = iFoldr (\i -> liftM2 (:) . f i) (return [])
 
