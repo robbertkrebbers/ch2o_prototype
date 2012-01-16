@@ -21,25 +21,25 @@ import Memory
 import Prelude
 import Data.Bits
 import Control.Monad
+import Control.Monad.Identity
 import Control.Monad.Maybe
-import Control.Monad.State
 import Control.Applicative
 
 {- Manipulation of values -}
-castB :: EnvReader m => RBVal -> BType -> MaybeT m RBVal
-castB (VPointer p) (TPointer τ) = VPointer <$> maybeT (pCast p τ)
+castB :: (MonadPlus m, EnvReader m) => RBVal -> BType -> m RBVal
+castB (VPointer p) (TPointer τ) = VPointer <$> maybeZero (pCast p τ)
 castB (VNULL _)    (TPointer τ) = return (VNULL τ)
 castB v            τ            = guard (bTypeOf v == τ) >> return v
 
-cast :: EnvReader m => RVal -> Type -> MaybeT m RVal
+cast :: (MonadPlus m, EnvReader m) => RVal -> Type -> m RVal
 cast (VBase _ v) (TBase _ τ) = VBase False <$> castB v τ
-cast _           _           = nothingT
+cast _           _           = mzero
 
 {- Operations -}
 data BinOp = PlusOp | MinusOp | MultOp | DivOp | RemOp | ShiftLOp | ShiftROp |
   LeOp | LtOp | GeOp | GtOp | EqOp | NeOp |
-  BitAndOp | BitOrOp | BitXorOp deriving (Eq, Show)
-data UnOp = NotOp | CompOp | NegOp deriving (Eq, Show)
+  BitAndOp | BitOrOp | BitXorOp deriving (Eq, Show, Ord)
+data UnOp = NotOp | CompOp | NegOp deriving (Eq, Show, Ord)
 
 boolToInt :: Bool -> Integer
 boolToInt b = if b then 1 else 0
@@ -92,14 +92,14 @@ valToBool _           = Nothing
 negateVal :: BVal a -> Maybe (BVal a)
 negateVal v = boolToValB <$> not <$> valToBoolB v
 
-evalUnOpB :: MemReader m => UnOp -> BVal a -> MaybeT m (BVal a)
-evalUnOpB op    (VInt x) = maybeT (VInt <$> evalUnOpInt op x)
-evalUnOpB NotOp v        = maybeT (negateVal v)
-evalUnOpB _     _        = nothingT
+evalUnOpB :: (MonadPlus m, MemReader m) => UnOp -> BVal a -> m (BVal a)
+evalUnOpB op    (VInt x) = maybeZero (VInt <$> evalUnOpInt op x)
+evalUnOpB NotOp v        = maybeZero (negateVal v)
+evalUnOpB _     _        = mzero
 
-evalUnOp :: MemReader m => UnOp -> RVal -> MaybeT m RVal
+evalUnOp :: (MonadPlus m, MemReader m) => UnOp -> RVal -> m RVal
 evalUnOp op (VBase _ v) = VBase False <$> evalUnOpB op v
-evalUnOp _  _           = nothingT
+evalUnOp _  _           = mzero
 
 typeBinOpB :: BinOp -> BType -> BType -> Maybe BType
 typeBinOpB NeOp    τ1            τ2            = typeBinOpB EqOp τ1 τ2
@@ -118,14 +118,14 @@ typeBinOp :: BinOp -> Type -> Type -> Maybe Type
 typeBinOp op (TBase _ τ1) (TBase _ τ2) = TBase False <$> typeBinOpB op τ1 τ2
 typeBinOp _  _            _            = Nothing
 
-evalBinOpB :: MemReader m => BinOp -> RBVal -> RBVal-> MaybeT m RBVal
-evalBinOpB op      (VInt x)      (VInt y)      = maybeT (VInt <$> evalBinOpInt op x y)
-evalBinOpB NeOp    v1            v2            = evalBinOpB EqOp v1 v2 >>= maybeT . negateVal
+evalBinOpB :: (MonadPlus m, MemReader m) => BinOp -> RBVal -> RBVal-> m RBVal
+evalBinOpB op      (VInt x)      (VInt y)      = maybeZero (VInt <$> evalBinOpInt op x y)
+evalBinOpB NeOp    v1            v2            = evalBinOpB EqOp v1 v2 >>= maybeZero . negateVal
 evalBinOpB GeOp    v1            v2            = evalBinOpB LeOp v2 v1
 evalBinOpB GtOp    v1            v2            = evalBinOpB LtOp v2 v1
-evalBinOpB PlusOp  (VInt x)      (VPointer p)  = maybeT (VPointer <$> pPlus (fromEnum x) p)
-evalBinOpB PlusOp  (VPointer p)  (VInt x)      = maybeT (VPointer <$> pPlus (fromEnum x) p)
-evalBinOpB MinusOp (VPointer p1) (VPointer p2) = maybeT (VInt <$> toEnum <$> pMinus p1 p2)
+evalBinOpB PlusOp  (VInt x)      (VPointer p)  = maybeZero (VPointer <$> pPlus (fromEnum x) p)
+evalBinOpB PlusOp  (VPointer p)  (VInt x)      = maybeZero (VPointer <$> pPlus (fromEnum x) p)
+evalBinOpB MinusOp (VPointer p1) (VPointer p2) = maybeZero (VInt <$> toEnum <$> pMinus p1 p2)
 evalBinOpB MinusOp (VNULL _)     (VNULL _)     = return (VInt 0)
 evalBinOpB EqOp    (VPointer _)  (VNULL _)     = return vFalse
 evalBinOpB EqOp    (VNULL _)     (VPointer _)  = return vFalse
@@ -135,11 +135,11 @@ evalBinOpB LeOp    (VPointer p1) (VPointer p2) = boolToValB <$> (p1 <=? p2)
 evalBinOpB LeOp    (VNULL _)     (VNULL _)     = return vTrue
 evalBinOpB LtOp    (VPointer p1) (VPointer p2) = boolToValB <$> (p1 <? p2)
 evalBinOpB LtOp    (VNULL _)     (VNULL _)     = return vFalse
-evalBinOpB _       _              _            = nothingT
+evalBinOpB _       _              _            = mzero
 
-evalBinOp :: MemReader m => BinOp -> RVal -> RVal-> MaybeT m RVal
+evalBinOp :: (MonadPlus m, MemReader m) => BinOp -> RVal -> RVal-> m RVal
 evalBinOp op (VBase _ v1) (VBase _ v2) = VBase False <$> evalBinOpB op v1 v2
-evalBinOp _  _            _            = nothingT
+evalBinOp _  _            _            = mzero
 
 {- Expressions -}
 data Expr :: * -> * where
@@ -171,6 +171,7 @@ type VLType = Expr Type
 type RExpr  = Expr RVal
 type LExpr  = Expr LVal
 
+deriving instance Ord (Expr a)
 deriving instance Eq (Expr a)
 deriving instance Show (Expr a)
 
@@ -199,7 +200,7 @@ eMap ft fv fl = m
   m (EDeref r)        = EDeref (m r)
   m (ELField su i l)  = ELField su i (m l)
 
-constExpr :: MemReader m => (Id -> MaybeT m Block) -> Expr a -> MaybeT m a
+constExpr :: (MonadPlus m, MemReader m) => (Id -> m Block) -> Expr a -> m a
 constExpr _ (VLType a)        = return a
 constExpr f (VLPointer c τ)   = TBase c . TPointer <$> constExpr f τ
 constExpr f (VLArray τvl r)   = do
@@ -221,7 +222,7 @@ constExpr f (EUnOp op r)      = do
   evalUnOp op v
 constExpr f (EIf r1 r2 r3)    = do
   v <- constExpr f r1
-  b <- maybeT (valToBool v)
+  b <- maybeZero (valToBool v)
   if b then constExpr f r2 else constExpr f r3
 constExpr f (ECast τvl r)     = do
   τ <- constExpr f τvl
@@ -236,10 +237,10 @@ constExpr f (EDeref r)        = do
 constExpr f (ELField su i l)  = do
   p <- constExpr f l
   pBranch su i p
-constExpr _ _                 = nothingT
+constExpr _ _                 = mzero
 
 constExpr_ :: Expr a -> Maybe a
-constExpr_ e = evalState (runMaybeT (constExpr (\_ -> nothingT) e)) emptyMem
+constExpr_ = runIdentity . runMaybeT . constExpr (\_ -> mzero)
 
 vlErase :: VLType -> Type
 vlErase (VLType τ)      = τ
@@ -282,35 +283,36 @@ type RCtx = ECtx RVal
 type LCtx = ECtx LVal
 
 deriving instance Eq (ECtx a b)
+deriving instance Ord (ECtx a b)
 deriving instance Show (ECtx a b)
 
 eCtxMap :: (VLType -> VLType) -> (RExpr -> RExpr) -> (LExpr -> LExpr) -> ECtx a b -> ECtx a b
 eCtxMap ft fr fl = m
  where
   m :: ECtx a b -> ECtx a b
-  m CtxTop                = CtxTop
-  m (CtxPointer c k)      = CtxPointer c (m k)
-  m (CtxArrayL r k)       = CtxArrayL (fr r) (m k)
-  m (CtxCastL r k)        = CtxCastL (fr r) (m k)
-  m (CtxCall x rsl rsr k) = CtxCall x (fr <$> rsl) (fr <$> rsr) (m k)
-  m (CtxAssignR l k)      = CtxAssignR (fl l) (m k)
-  m (CtxField su i k)     = CtxField su i (m k)
-  m (CtxBinOpL op r2 k)   = CtxBinOpL op (fr r2) (m k)
-  m (CtxBinOpR op r1 k)   = CtxBinOpR op (fr r1) (m k)
-  m (CtxUnOp op k)        = CtxUnOp op (m k)
-  m (CtxPreOpR op l k)    = CtxPreOpR op (fl l) (m k)
-  m (CtxPostOpR op l k)   = CtxPostOpR op (fl l) (m k)
-  m (CtxCastR τ k)        = CtxCastR (ft τ) (m k)
-  m (CtxArrayR τ k)       = CtxArrayR (ft τ) (m k)
-  m (CtxDeref k)          = CtxDeref (m k)
-  m (CtxIf rt rf k)       = CtxIf (fr rt) (fr rf) (m k)
-  m (CtxComma r2 k)       = CtxComma (fr r2) (m k)
-  m (CtxToVal k)          = CtxToVal (m k)
-  m (CtxAssignL r k)      = CtxAssignL (fr r) (m k)
-  m (CtxLField su i k)    = CtxLField su i (m k)
-  m (CtxAddrOf k)         = CtxAddrOf (m k)
-  m (CtxPreOpL op r k)    = CtxPreOpL op (fr r) (m k)
-  m (CtxPostOpL op r k)   = CtxPostOpL op (fr r) (m k)
+  m CtxTop                  = CtxTop
+  m (CtxPointer c k)        = CtxPointer c (m k)
+  m (CtxArrayL r k)         = CtxArrayL (fr r) (m k)
+  m (CtxCastL r k)          = CtxCastL (fr r) (m k)
+  m (CtxCall x rsl rsr k)   = CtxCall x (fr <$> rsl) (fr <$> rsr) (m k)
+  m (CtxAssignR l k)        = CtxAssignR (fl l) (m k)
+  m (CtxField su i k)       = CtxField su i (m k)
+  m (CtxBinOpL op r2 k)     = CtxBinOpL op (fr r2) (m k)
+  m (CtxBinOpR op r1 k)     = CtxBinOpR op (fr r1) (m k)
+  m (CtxUnOp op k)          = CtxUnOp op (m k)
+  m (CtxPreOpR op l k)      = CtxPreOpR op (fl l) (m k)
+  m (CtxPostOpR op l k)     = CtxPostOpR op (fl l) (m k)
+  m (CtxCastR τ k)          = CtxCastR (ft τ) (m k)
+  m (CtxArrayR τ k)         = CtxArrayR (ft τ) (m k)
+  m (CtxDeref k)            = CtxDeref (m k)
+  m (CtxIf rt rf k)         = CtxIf (fr rt) (fr rf) (m k)
+  m (CtxComma r2 k)         = CtxComma (fr r2) (m k)
+  m (CtxToVal k)            = CtxToVal (m k)
+  m (CtxAssignL r k)        = CtxAssignL (fr r) (m k)
+  m (CtxLField su i k)      = CtxLField su i (m k)
+  m (CtxAddrOf k)           = CtxAddrOf (m k)
+  m (CtxPreOpL op r k)      = CtxPreOpL op (fr r) (m k)
+  m (CtxPostOpL op r k)     = CtxPostOpL op (fr r) (m k)
 
 class Subst a b c | a b -> c where
   subst :: a -> b -> c
@@ -360,10 +362,9 @@ data Redex b where
   RedDeref    :: LCtx b -> RVal -> Redex b
   RedLField   :: LCtx b -> StructUnion -> Int -> LVal -> Redex b
 
-instance Eq (Redex b) where
-  r1 == r2 = case (r1,r2) of _ -> r1 == r2
-instance Show (Redex b) where
-  show r = case r of _ -> show r
+deriving instance Ord (Redex b)
+deriving instance Eq (Redex b)
+deriving instance Show (Redex b)
 
 {- Splitting expressions -}
 split :: Expr a -> Either a [Redex a]

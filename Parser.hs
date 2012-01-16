@@ -14,8 +14,6 @@ Missing:
 -}
 module Parser where
 
-import Debug.Trace
-
 import Util
 import Types
 import Values
@@ -24,6 +22,7 @@ import Memory
 import Expressions
 import Statements
 import CSemantics
+import CMonads
 
 import Data.Maybe
 import Data.List hiding (insert)
@@ -64,15 +63,16 @@ data PFun = PFun {
 
 {- Pre-states -}
 data PreCState = PreCState {
-  pMem :: Mem,
-  pStructFields :: Map Id [Id],
-  pFuns :: Map Id PFun,
-  pScopes :: [Scope],
+  pEnv           :: Env,
+  pMem           :: Mem,
+  pStructFields  :: Map Id [Id],
+  pFuns          :: Map Id PFun,
+  pScopes        :: [Scope],
   pStructCounter :: Int
 } deriving (Eq, Show)
 
 instance EnvReader (State PreCState) where
-  getEnv = gets (mEnv . pMem)
+  getEnv = gets pEnv
 instance SimpleMemReader MBVal (State PreCState) where
   getMem = gets pMem
 instance SimpleMemWriter MBVal (State PreCState) where
@@ -85,7 +85,7 @@ type PreCMonad = ErrorT String (State PreCState)
 type PreCMaybe = MaybeT (State PreCState)
 
 emptyPreCState :: PreCState
-emptyPreCState = PreCState emptyMem Map.empty Map.empty [newScope] 0
+emptyPreCState = PreCState emptyEnv emptyMem Map.empty Map.empty [newScope] 0
 
 runPreCMonad :: PreCMonad a -> PreCState -> (Either String a, PreCState)
 runPreCMonad m s = runState (runErrorT m) s
@@ -107,11 +107,11 @@ pGetFuns st = Map.foldrWithKey f (return Map.empty) (pFuns st)
   f x (PFun xs τ (Just s)) fs = Map.insert x (Fun xs τ s) <$> fs
   f _ (PFun _  _ Nothing)  _  = throwError "incomplete function"
 
-toCState :: PreCState -> Either String CState
+toCState :: PreCState -> Either String (CEnv,CState)
 toCState st = do
   gs <- pGetGlobalVars st
   fs <- pGetFuns st
-  return (CState (pMem st) fs gs [])
+  return (CEnv (pEnv st) fs gs, CState (pMem st) [] [] [])
 
 pGetFun :: Id -> PreCMaybe PFun
 pGetFun x = gets pFuns >>= maybeT . Map.lookup x
@@ -182,8 +182,9 @@ pNewStruct _  Nothing = lift (pFreshStruct Nothing)
   
 pStoreStruct :: StructUnion -> Id -> Assoc Id Type -> PreCMaybe ()
 pStoreStruct su s fs = do
-  modify $ \st -> st { pStructFields = Map.insert s xs (pStructFields st) }
-  modifyMem $ \m -> m { mEnv = insertUnsafe (su,s) τs (mEnv m) }
+  modify $ \st -> st { 
+    pStructFields = Map.insert s xs (pStructFields st),
+    pEnv = insertUnsafe (su,s) τs (pEnv st) }
  where xs = fst <$> fs; τs = snd <$> fs
 
 scopeDecls :: PreCMonad (Assoc Id Decl)
@@ -446,7 +447,7 @@ cTypeSpecToType (CCharType _:_)     = throwError "char not supported"
 cInitToRExpr :: VLType -> CInit -> PreCMonad RExpr
 cInitToRExpr τvl (CInitExpr e _) = do
   (r,τ) <- cToRExpr e
-  unless (τ == remConst (vlErase τvl)) $ throwError "initialiser of incorrect type"
+  unless (τ == vlErase τvl) $ throwError ("initialiser of incorrect type" ++ show (r,τ))
   return r    
 cInitToRExpr _   (CInitList _ _) = throwError "compound initialiser not supported"
 

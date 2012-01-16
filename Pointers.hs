@@ -11,7 +11,6 @@ import Values
 import SimpleMemory
 
 import Control.Monad
-import Control.Monad.Maybe
 
 {- Pointers -}
 data Pointer c = Pointer {
@@ -19,7 +18,7 @@ data Pointer c = Pointer {
   pObjType  :: Type,
   pOffset   :: Int,
   pType     :: Type
-} deriving (Eq, Show)
+} deriving (Eq, Show, Ord)
 
 instance BlockOf (Pointer c) where
   blockOf = blockOf . pObjAddr
@@ -54,7 +53,7 @@ pCast (Pointer a aτ i _) σ =
 instance (BTypeOf a, SimpleMemReader a m) => Check m (Pointer c) where
   check p = check (pObjAddr p) &&? return (0 <= pOffset p && pOffset p <= pLength p && pIsAlligned p)
 
-blockPointer :: SimpleMemReader a m => Block -> MaybeT m (Pointer c)
+blockPointer :: (MonadPlus m, SimpleMemReader a m) => Block -> m (Pointer c)
 blockPointer b = do
   τ <- typeOfBlock b
   return (Pointer (addr b) τ 0 τ)
@@ -77,19 +76,19 @@ pMinus (Pointer a1 _ i1 τ1) (Pointer a2 _ i2 τ2) = do
 instance SimpleMemReader a m => Determinate m (Pointer c) where
   isDeterminate = blockValid . blockOf
 
-pBranch :: (SimpleMemReader a m, Cis c) => StructUnion -> Int -> Pointer c -> MaybeT m (Pointer c)
+pBranch :: (MonadPlus m, SimpleMemReader a m, Cis c) => StructUnion -> Int -> Pointer c -> m (Pointer c)
 pBranch su i p = case typeOf p of
   TStruct su' c s | su == su' -> do
     guardM (isDeterminate p)
     τ <- field su c s i
-    a <- maybeT (pAddr p)
+    a <- maybeZero (pAddr p)
     return (Pointer (branch su i a) τ 0 τ)
-  _                           -> nothingT
+  _                           -> mzero
 
-instance SimpleMemReader a m => FuzzyOrd (MaybeT m) (Pointer c) where
+instance (MonadPlus m, SimpleMemReader a m) => FuzzyOrd m (Pointer c) where
   p ==? q | blockOf p == blockOf q = do
     guardM (isDeterminate p)
-    r <- maybeT (aRef (pObjAddr p) ==? aRef (pObjAddr q))
+    r <- aRef (pObjAddr p) ==? aRef (pObjAddr q)
     if r
     then return (pOffset p == pOffset q)
     else guard (pInRange p && pInRange q) >> return False
@@ -107,11 +106,11 @@ instance SimpleMemReader a m => FuzzyOrd (MaybeT m) (Pointer c) where
 
   p <=? q | blockOf p == blockOf q = do
     guardM (isDeterminate p)
-    r <- maybeT (aRef (pObjAddr p) ==? aRef (pObjAddr q))
+    r <- aRef (pObjAddr p) ==? aRef (pObjAddr q)
     if r
     then return (pOffset p <= pOffset q)
-    else guard (pInRange p && pInRange q) >> maybeT (aRef (pObjAddr p) <=? aRef (pObjAddr q))
-  _ <=? _ | otherwise            = nothingT
+    else guard (pInRange p && pInRange q) >> aRef (pObjAddr p) <=? aRef (pObjAddr q)
+  _ <=? _ | otherwise            = mzero
 
 {-
 aMap :: (Block -> Maybe Block) -> Addr -> Maybe Addr

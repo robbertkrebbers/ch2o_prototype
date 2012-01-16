@@ -10,20 +10,21 @@ import Util
 
 import Data.Maybe
 import Control.Applicative
+import Control.Monad.Identity
 import Control.Monad.Maybe
 import Control.Monad.Error
 
 {- Types -}
-data StructUnion = Struct | Union deriving (Eq, Show)
+data StructUnion = Struct | Union deriving (Eq, Show, Ord)
 
 data BType =
   TInt |
-  TPointer Type deriving (Eq, Show) -- TPointer restrict τ
+  TPointer Type deriving (Eq, Show, Ord) -- TPointer τ
 data Type =
   TBase Bool BType | -- TBase const τ
   TVoid |
   TArray Type Int |
-  TStruct StructUnion Bool Id deriving (Eq, Show) -- TStruct su const s
+  TStruct StructUnion Bool Id deriving (Eq, Show, Ord) -- TStruct su const s
 
 subType :: Type -> Type -> Bool
 τ1 `subType` τ2 | τ1 == τ2 = True
@@ -67,17 +68,19 @@ class (Functor m, Monad m) => EnvReader m where
   getEnv :: m Env
 instance EnvReader m => EnvReader (MaybeT m) where
   getEnv = lift getEnv
-instance (EnvReader m, Error e) => EnvReader (ErrorT e m) where
+instance (Error e, EnvReader m) => EnvReader (ErrorT e m) where
   getEnv = lift getEnv
+instance EnvReader Identity where
+  getEnv = return []
 
 structExists :: EnvReader m => StructUnion -> Id -> m Bool
 structExists su s = do e <- getEnv; return ((su,s) `inDom` e)
-fields :: EnvReader m => StructUnion -> Bool -> Id -> MaybeT m [Type]
-fields su c s = do e <- getEnv; fmap (makeConst c) <$> maybeT (lookup (su, s) e)
+fields :: (EnvReader m, MonadPlus m) => StructUnion -> Bool -> Id -> m [Type]
+fields su c s = do e <- getEnv; fmap (makeConst c) <$> maybeZero (lookup (su, s) e)
 fieldsDefault :: EnvReader m => StructUnion -> Bool -> Id -> m [Type]
 fieldsDefault su c s = fromMaybeT [] (fields su c s)
-field :: EnvReader m => StructUnion -> Bool -> Id -> Int -> MaybeT m Type
-field su c s x = fields su c s >>= maybeT . (!? x)
+field :: (EnvReader m, MonadPlus m) => StructUnion -> Bool -> Id -> Int -> m Type
+field su c s x = fields su c s >>= maybeZero . (!? x)
 
 {- Well-formedness of types -}
 checkBType :: Env -> BType -> Bool

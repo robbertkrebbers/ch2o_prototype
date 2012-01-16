@@ -1,12 +1,10 @@
 
 Main things to do:
 * Type checking and overloaded 0
-* Sequence points
-* Non-determinism
-* Base types
 * Register -> type checker
 * First class functions
 * Integer types
 * Malloc/free
 * Compound literals, initialisers
 * Simple IO
+

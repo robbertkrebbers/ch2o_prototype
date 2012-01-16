@@ -50,23 +50,20 @@ anyM f = foldM (\b x -> f x ||? return b) True
 try :: MonadError e m => e -> Maybe a -> m a
 try e = maybe (throwError e) return
 
+maybeZero :: MonadPlus m => Maybe a -> m a
+maybeZero = maybe mzero return 
+
+maybeT :: Monad m => Maybe a -> MaybeT m a
+maybeT = MaybeT . return
+
 modifyMaybe :: MonadState s m => (s -> Maybe s) -> MaybeT m ()
 modifyMaybe f = get >>= maybeT . f >>= put
 
 getsMaybe :: MonadState s m => (s -> Maybe a) -> MaybeT m a
 getsMaybe f = get >>= maybeT . f
 
-maybeT :: Monad m => Maybe a -> MaybeT m a
-maybeT = MaybeT . return
-
 fromMaybeT :: Monad m => a -> MaybeT m a -> m a
 fromMaybeT d = liftM (fromMaybe d) . runMaybeT
-
-nothingT :: Monad m => MaybeT m a
-nothingT = maybeT Nothing
-
-isJustT :: Monad m => MaybeT m a -> m Bool
-isJustT = liftM isJust . runMaybeT
 
 maybeSequence :: Monad m => Maybe (m a) -> m (Maybe a)
 maybeSequence Nothing  = return Nothing

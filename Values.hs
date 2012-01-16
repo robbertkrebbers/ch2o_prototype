@@ -15,7 +15,6 @@ import Types
 
 import Prelude
 import Control.Monad
-import Control.Monad.Maybe
 import Control.Applicative
 import Control.Monad.Trans
 import Control.Monad.Identity
@@ -38,7 +37,7 @@ data BVal p =
   VUndef BType |
   VInt Integer |
   VNULL Type |
-  VPointer p deriving (Eq, Show)
+  VPointer p deriving (Eq, Show, Ord)
 
 instance Functor BVal where
   fmap _ (VUndef τ)   = VUndef τ
@@ -75,8 +74,8 @@ instance Check m p => Check m (BVal p) where
 data Val a =
   VBase Bool a |
   VStruct Bool Id [AVal a] |
-  VUnion Bool Id (Maybe (Int,AVal a)) deriving (Eq, Show)
-data AVal a = VArray Type [Val a] deriving (Eq, Show)
+  VUnion Bool Id (Maybe (Int,AVal a)) deriving (Eq, Show, Ord)
+data AVal a = VArray Type [Val a] deriving (Eq, Show, Ord)
 
 isBase :: Val p -> Maybe p
 isBase (VBase _ a) = Just a
@@ -175,16 +174,16 @@ vTraverse f = vFoldr (\p a c -> f p a >> c) (return ())
 avTraverse :: (Monad m, SimpleReference r) => (r Val -> a -> m b) -> r AVal -> AVal a -> m ()
 avTraverse f = avFoldr (\p a c -> f p a >> c) (return ())
 
-newVal :: EnvReader m => (BType -> a) -> Type -> MaybeT m (Val a)
-newVal _    TVoid                = nothingT
+newVal :: (MonadPlus m, EnvReader m) => (BType -> a) -> Type -> m (Val a)
+newVal _    TVoid                = mzero
 newVal newB (TBase c τ)          = return (VBase c (newB τ))
 newVal newB (TStruct Struct c s) = do
   τs <- fields Struct False s
   VStruct c s <$> sequence (newAVal newB <$> τs)
 newVal _    (TStruct Union c s)  = return (VUnion c s Nothing)
-newVal _    (TArray _ _)         = nothingT
+newVal _    (TArray _ _)         = mzero
 
-newAVal :: EnvReader m => (BType -> a) -> Type -> MaybeT m (AVal a)
+newAVal :: (MonadPlus m, EnvReader m) => (BType -> a) -> Type -> m (AVal a)
 newAVal newB τ                   = VArray τ <$> replicate (arrayWidth τ) <$> newVal newB (arrayBase τ)
 
 aVal :: BTypeOf a => Val a -> AVal a
@@ -200,6 +199,16 @@ data Ref :: * -> (* -> *) -> (* -> *) -> * where
 deriving instance Eq c => Eq (Ref c v w)
 deriving instance Show c => Show (Ref c v w)
 
+instance Ord c => Ord (Ref c v w) where
+  RHere        <= _            = True
+  _            <= RHere        = False
+  RStruct i p  <= RStruct j q  = if i /= j then i <= j else p <= q
+  RStruct _ _  <= _            = True
+  _            <= RStruct _ _  = False
+  RUnion c i p <= RUnion d j q = if c /= d then c <= d else if i == j then i <= j else p <= q
+  RArray i p   <= RArray j q   = if i /= j then i <= j else p <= q
+  _            <= _            = False
+
 class Eq c => Cis c where noCis :: c
 instance Cis ()     where noCis = ()
 instance Cis Bool   where noCis = False
@@ -210,12 +219,12 @@ rCisReset (RStruct i p)  = RStruct i (rCisReset p)
 rCisReset (RUnion _ i p) = RUnion noCis i (rCisReset p)
 rCisReset (RArray i p)   = RArray i (rCisReset p)
 
-target :: EnvReader m => Ref c v w -> Type -> MaybeT m Type
+target :: (MonadPlus m, EnvReader m) => Ref c v w -> Type -> m Type
 target RHere          τ                    = return τ
 target (RStruct i p)  (TStruct Struct c s) = field Struct c s i >>= target p
 target (RUnion _ i p) (TStruct Union c s)  = field Union c s i >>= target p
 target (RArray i p)   τ                    = guard (0 <= i && i < arrayWidth τ) >> target p (arrayBase τ)
-target _              _                    = nothingT
+target _              _                    = mzero
 
 instance Reference (Ref c) where
   RHere         +++ p2 = p2
@@ -239,22 +248,22 @@ instance Related (Ref c v w) where
   RArray i p   `related` RArray j q   = i == j && p `related` q
   _            `related` _            = False
 
-instance FuzzyOrd Maybe (Ref c v w) where
-  RHere        ==? RHere        = Just True
-  RHere        ==? _            = Nothing
-  _            ==? RHere        = Nothing
-  RStruct i p  ==? RStruct j q  = if i == j then p ==? q else Just False
-  RUnion _ i p ==? RUnion _ j q = if i == j then p ==? q else Nothing
-  RArray i p   ==? RArray j q   = if i == j then p ==? q else Just False
-  _            ==? _            = Nothing
+instance (Functor m, MonadPlus m) => FuzzyOrd m (Ref c v w) where
+  RHere        ==? RHere        = return True
+  RHere        ==? _            = mzero
+  _            ==? RHere        = mzero
+  RStruct i p  ==? RStruct j q  = if i == j then p ==? q else return False
+  RUnion _ i p ==? RUnion _ j q = if i == j then p ==? q else mzero
+  RArray i p   ==? RArray j q   = if i == j then p ==? q else return False
+  _            ==? _            = mzero
 
-  RHere        <=? RHere        = Just True
-  RHere        <=? _            = Nothing
-  _            <=? RHere        = Nothing
-  RStruct i p  <=? RStruct j q  = if i <= j then p <=? q else Just False
-  RUnion _ i p <=? RUnion _ j q = if i == j then p <=? q else Nothing
-  RArray i p   <=? RArray j q   = if i <= j then p <=? q else Just False
-  _            <=? _            = Nothing
+  RHere        <=? RHere        = return True
+  RHere        <=? _            = mzero
+  _            <=? RHere        = mzero
+  RStruct i p  <=? RStruct j q  = if i <= j then p <=? q else return False
+  RUnion _ i p <=? RUnion _ j q = if i == j then p <=? q else mzero
+  RArray i p   <=? RArray j q   = if i <= j then p <=? q else return False
+  _            <=? _            = mzero
 
 rStripPrefix :: Eq c => Ref c u v -> Ref c u w -> Maybe (Ref c v w)
 rStripPrefix RHere             p                 = Just p
@@ -267,10 +276,10 @@ rStripArray :: Ref c AVal w -> Maybe (Int, Ref c Val w)
 rStripArray RHere        = Nothing
 rStripArray (RArray i p) = Just (i, p)
 
-follow :: (EnvReader m, Cis c) => Ref c v w -> v a -> MaybeT m (w a)
+follow :: (MonadPlus m, EnvReader m, Cis c) => Ref c v w -> v a -> m (w a)
 follow RHere           v                                        = return v
 follow (RStruct i p)   (VStruct c _ vs)                         = do
-  v <- maybeT (vs !? i)
+  v <- maybeZero (vs !? i)
   follow p (makeConst c v)
 follow (RUnion _ i p)  (VUnion c _ (Just (i',v))) | i == i'     = follow p (makeConst c v)
 follow (RUnion ci i p) (VUnion c u (Just (i',v))) | ci /= noCis = case p of
@@ -278,16 +287,16 @@ follow (RUnion ci i p) (VUnion c u (Just (i',v))) | ci /= noCis = case p of
     cs <- cisFields u i i'
     guard (j < cs)
     follow p (makeConst c v)
-  _                      -> nothingT
+  _                      -> mzero
 follow (RArray i p)    (VArray _ vs)                            = do
-  v <- maybeT (vs !? i)
+  v <- maybeZero (vs !? i)
   follow p v
-follow _               _                                        = nothingT
+follow _               _                                        = mzero
 
-vUpdate :: (EnvReader m, Defined a, Cis c) => (w a -> MaybeT m (w a)) -> Ref c v w -> v a -> MaybeT m (v a)
+vUpdate :: (MonadPlus m, EnvReader m, Defined a, Cis c) => (w a -> m (w a)) -> Ref c v w -> v a -> m (v a)
 vUpdate f RHere           v                                        = f v
 vUpdate f (RStruct i p)   (VStruct c s vs)                         = do
-  v <- maybeT (vs !? i)
+  v <- maybeZero (vs !? i)
   v' <- vUpdate f p (makeConst c v)
   return (VStruct c s (updateAt i v' vs))
 vUpdate f (RUnion _ i p)  (VUnion c u (Just (i',v))) | i == i'     = do
@@ -301,18 +310,18 @@ vUpdate f (RUnion ci i p) (VUnion c u (Just (i',_))) | ci /= noCis = case p of
     v <- newAVal undef τ
     v' <- vUpdate f p (makeConst c v)
     return (VUnion c u (Just (i,v')))
-  _                      -> nothingT
+  _                      -> mzero
 vUpdate f (RUnion _ i p)  (VUnion c u Nothing)                     = do
   τ <- field Union False u i
   v <- newAVal undef τ
   v' <- vUpdate f p (makeConst c v)
   return (VUnion c u (Just (i,v')))
 vUpdate f (RArray i p)    (VArray τ vs)                            = do
-  v <- maybeT (vs !? i)
+  v <- maybeZero (vs !? i)
   v' <- vUpdate f p v
   return (VArray τ (updateAt i v' vs))
-vUpdate _ _               _                                        = nothingT
+vUpdate _ _               _                                        = mzero
 
-vSet :: (EnvReader m, Defined a, Cis c) => Ref c v w -> w a -> v a -> MaybeT m (v a)
+vSet :: (MonadPlus m, EnvReader m, Defined a, Cis c) => Ref c v w -> w a -> v a -> m (v a)
 vSet p w = vUpdate (\_ -> return w) p
 

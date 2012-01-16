@@ -19,18 +19,17 @@ import Expressions
 
 import Prelude
 import Control.Monad
-import Control.Monad.Maybe
 import Control.Applicative
 
 {- Declarations -}
-data Decl = DAuto Type | DStatic Block deriving (Eq, Show)
-data AllocDecl = AllocAuto Block | AllocStatic Block deriving (Eq, Show)
+data Decl = DAuto Type | DStatic Block deriving (Eq, Show, Ord)
+data AllocDecl = AllocAuto Block | AllocStatic Block deriving (Eq, Show, Ord)
 
-allocD :: MemWriter m => Decl -> MaybeT m AllocDecl
+allocD :: (MonadPlus m, MemWriter m) => Decl -> m AllocDecl
 allocD (DAuto τ)   = alloc τ Nothing MAuto >>= return . AllocAuto
 allocD (DStatic b) = return (AllocStatic b)
 
-freeD :: MemWriter m => AllocDecl -> MaybeT m Decl
+freeD :: (MonadPlus m, MemWriter m) => AllocDecl -> m Decl
 freeD (AllocAuto b)   = do
   τ <- typeOfBlock b
   free False b
@@ -42,7 +41,7 @@ instance BlockOf AllocDecl where
   blockOf (AllocStatic b) = b
 
 {- Statements -}
-data Trap = Continue | Break deriving (Eq, Show)
+data Trap = Continue | Break deriving (Eq, Show, Ord)
 
 data Stmt =
   SExpr RExpr |
@@ -59,7 +58,7 @@ data Stmt =
   SLoop Stmt |
   STrap Trap |
   SSetTrap Trap Stmt
-  deriving (Eq, Show)
+  deriving (Eq, Show, Ord)
 
 sContinue :: Stmt
 sContinue = STrap Continue
@@ -110,7 +109,7 @@ data SCtxSeg =
   CtxCase (Maybe Integer) |
   CtxLoop |
   CtxSetTrap Trap
-  deriving (Eq, Show)
+  deriving (Eq, Show, Ord)
 
 type SCtx = [SCtxSeg]
 type SInCtx = (SCtx,Stmt)
@@ -121,10 +120,10 @@ getLocal x (CtxBlock ds:k)      = (blockOf <$> lookup x ds) `mplus` getLocal x k
 getLocal x (CtxVLDecl x' _ b:k) = if x == x' then Just b else getLocal x k
 getLocal x (_:k)                = getLocal x k
 
-data PathSeg = Up | Down Int deriving (Eq, Show)
+data PathSeg = Up | Down Int deriving (Eq, Show, Ord)
 type Path = [PathSeg]
 
-changeCtx :: MemWriter m => Path -> SInCtx -> MaybeT m SInCtx
+changeCtx :: (MonadPlus m, MemWriter m) => Path -> SInCtx -> m SInCtx
 changeCtx [] sc                         = return sc
 changeCtx (Up:p) (CtxBlock ds:k, s)     = do
   fds <- assocMapM freeD ds
@@ -142,7 +141,7 @@ changeCtx (Up:p) (CtxSetTrap t:k, s)    = changeCtx p (k, SSetTrap t s)
 changeCtx (Down 0:p) (k, SBlock ds s)   = do
   ads <- assocMapM allocD ds
   changeCtx p (CtxBlock ads:k, s)
-changeCtx (Down 0:_) (_, SVLDecl _ _ _) = nothingT --jumping into a VLA block is undefined
+changeCtx (Down 0:_) (_, SVLDecl _ _ _) = mzero --jumping into a VLA block is undefined
 changeCtx (Down 0:p) (k, SComp s1 s2)   = changeCtx p (CtxCompL s2:k, s1)
 changeCtx (Down 1:p) (k, SComp s1 s2)   = changeCtx p (CtxCompR s1:k, s2)
 changeCtx (Down 0:p) (k, SIf e st sf)   = changeCtx p (CtxIfT e sf:k, st)
@@ -152,9 +151,9 @@ changeCtx (Down 0:p) (k, SLabel l s)    = changeCtx p (CtxLabel l:k, s)
 changeCtx (Down 0:p) (k, SCase c s)     = changeCtx p (CtxCase c:k, s)
 changeCtx (Down 0:p) (k, SLoop s)       = changeCtx p (CtxLoop:k, s)
 changeCtx (Down 0:p) (k, SSetTrap t s)  = changeCtx p (CtxSetTrap t:k, s)
-changeCtx _          _                  = nothingT
+changeCtx _          _                  = mzero
 
-next :: MemWriter m => SInCtx -> MaybeT m (Maybe SInCtx)
+next :: (MonadPlus m, MemWriter m) => SInCtx -> m (Maybe SInCtx)
 next (k',s') = case next' k' of
   Just p  -> Just <$> changeCtx p (k',s')
   Nothing -> return Nothing
@@ -165,9 +164,9 @@ next (k',s') = case next' k' of
   next' (CtxLoop:_)    = Just []
   next' (_:k)          = (Up:) <$> next' k
 
-toTrap :: MemWriter m => Trap -> SInCtx -> MaybeT m SInCtx
+toTrap :: (MonadPlus m, MemWriter m) => Trap -> SInCtx -> m SInCtx
 toTrap t (k',s') = do
-  p <- maybeT (toTrap' k')
+  p <- maybeZero (toTrap' k')
   changeCtx p (k',s')
  where
   toTrap' :: SCtx -> Maybe Path
@@ -175,9 +174,9 @@ toTrap t (k',s') = do
   toTrap' (CtxSetTrap t':k) = if t == t' then Just [] else (Up:) <$> toTrap' k
   toTrap' (_:k)             = (Up:) <$> toTrap' k
 
-toLabel :: MemWriter m => Id -> SInCtx -> MaybeT m SInCtx
+toLabel :: (MonadPlus m, MemWriter m) => Id -> SInCtx -> m SInCtx
 toLabel l (k',s') = do
-  p <- maybeT (down s' `mplus` up k')
+  p <- maybeZero (down s' `mplus` up k')
   changeCtx p (k',s')
  where
   down :: Stmt -> Maybe Path
@@ -203,9 +202,9 @@ toLabel l (k',s') = do
   up (CtxCase _:k)   = (Up:) <$> up k
   up (_:k)           = (Up:) <$> up k
 
-toCase :: MemWriter m => Integer -> SInCtx -> MaybeT m SInCtx
+toCase :: (MonadPlus m, MemWriter m) => Integer -> SInCtx -> m SInCtx
 toCase c (k',s') = do
-  p <- maybeT (toCase' (Just c) s' `mplus` toCase' Nothing s')
+  p <- maybeZero (toCase' (Just c) s' `mplus` toCase' Nothing s')
   changeCtx p (k',s')
  where
   toCase' :: Maybe Integer -> Stmt -> Maybe Path
@@ -220,7 +219,7 @@ toCase c (k',s') = do
   toCase' mc (SSetTrap _ s)  = (Down 0:) <$> toCase' mc s
   toCase' _  _               = Nothing
 
-toTop :: MemWriter m => SInCtx -> MaybeT m SInCtx
+toTop :: (MonadPlus m, MemWriter m) => SInCtx -> m SInCtx
 toTop (k,s) = changeCtx (toTop' k) (k, s)
  where
   toTop' :: SCtx -> Path
@@ -237,8 +236,21 @@ data EInS :: * -> * where
 type TInS = EInS Type
 type RInS = EInS RVal
 
-deriving instance Eq b   => Eq (EInS b)
-deriving instance Show b => Show (EInS b)
+deriving instance Eq (EInS b)
+deriving instance Show (EInS b)
+
+instance Ord (EInS b) where
+  CtxVLDeclT x r <= CtxVLDeclT y s = if x /= y then x <= y else r <= s
+  CtxExpr        <= _              = True
+  _              <= CtxExpr        = False
+  CtxReturn      <= _              = True
+  _              <= CtxReturn      = False
+  CtxIfE r1 r2   <= CtxIfE s1 s2   = if r1 /= s1 then r1 <= s1 else r2 <= s2
+  CtxIfE _ _     <= _              = True
+  _              <= CtxIfE _ _     = False
+  CtxSwitchE r   <= CtxSwitchE s   = r <= s
+  CtxSwitchE _   <= _              = True
+  _              <= CtxSwitchE _   = False  
 
 -- dead code
 instance Subst (EInS b) (Expr b) Stmt where
@@ -253,7 +265,7 @@ data EInSCtx b = EInSCtx {
   eInS  :: EInS b,
   eExpr :: Expr b, -- the original expression
   eTmps :: [Block]
-} deriving (Eq, Show)
+} deriving (Eq, Show, Ord)
 
 ctxVLDeclT :: SCtx -> Id -> VLType -> Stmt -> EInSCtx Type
 ctxVLDeclT k x τ s = EInSCtx k (CtxVLDeclT x s) τ []
